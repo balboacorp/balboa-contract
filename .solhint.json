@@ -1,0 +1,19 @@
+{
+  "extends": "solhint:recommended",
+  "plugins": [],
+  "rules": {
+    "compiler-version": ["error", "^0.8.24"],
+    "func-visibility": ["warn", { "ignoreConstructors": true }],
+    "max-line-length": ["warn", 120],
+    "no-unused-vars": "warn",
+    "reason-string": ["warn", { "maxLength": 64 }],
+    "not-rely-on-time": "off",
+    "no-empty-blocks": "off",
+    "no-inline-assembly": "off",
+    "no-global-import": "off",
+    "use-natspec": "off",
+    "gas-indexed-events": "off",
+    "gas-calldata-parameters": "off",
+    "function-max-lines": "off"
+  }
+}

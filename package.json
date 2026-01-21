@@ -1,0 +1,43 @@
+{
+  "name": "balboa",
+  "version": "1.0.0",
+  "description": "BALBOA - Upgradeable ERC20 token with deterministic cross-chain deployment using CREATE2",
+  "main": "index.js",
+  "scripts": {
+    "compile": "hardhat compile",
+    "test": "hardhat test",
+    "deploy": "hardhat run scripts/deploy_deterministic.ts",
+    "upgrade": "hardhat run scripts/upgrade.ts",
+    "lint": "solhint 'contracts/**/*.sol'",
+    "lint:fix": "solhint 'contracts/**/*.sol' --fix",
+    "format": "prettier --write 'contracts/**/*.sol' 'test/**/*.ts' 'scripts/**/*.ts'",
+    "prepare": "husky"
+  },
+  "keywords": [
+    "hardhat",
+    "ethereum",
+    "upgradeable",
+    "create2",
+    "uups",
+    "erc20"
+  ],
+  "author": "",
+  "license": "MIT",
+  "devDependencies": {
+    "@nomicfoundation/hardhat-toolbox": "^5.0.0",
+    "@openzeppelin/hardhat-upgrades": "^3.5.0",
+    "@types/node": "^22.0.0",
+    "hardhat": "^2.22.0",
+    "husky": "^9.1.7",
+    "prettier": "^3.7.1",
+    "prettier-plugin-solidity": "^2.2.0",
+    "solhint": "^6.0.1",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.0.0"
+  },
+  "dependencies": {
+    "@openzeppelin/contracts": "^5.1.0",
+    "@openzeppelin/contracts-upgradeable": "^5.1.0",
+    "dotenv": "^16.4.0"
+  }
+}

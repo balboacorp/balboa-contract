@@ -1,0 +1,185 @@
+#!/bin/bash
+
+# Function to create a fallback commit message
+create_fallback_message() {
+    CHANGED_FILES=$(git diff --staged --name-only 2>/dev/null)
+    FILE_COUNT=$(echo "$CHANGED_FILES" | wc -l)
+    
+    if [ -z "$CHANGED_FILES" ]; then
+        echo "Update project files"
+    elif [ "$FILE_COUNT" -eq 1 ]; then
+        echo "$CHANGED_FILES"
+    else
+        # List all changed files, comma separated
+        echo "$CHANGED_FILES" | tr '\n' ', ' | sed 's/, $//'
+    fi
+}
+
+# Auto-fix staged files using lint-staged (preferred) or fall back to pnpm lint:fix
+echo "🔧 Auto-fixing staged files..."
+# Try lint-staged without installing global deps (npx --no-install keeps it fast);
+# if lint-staged is not available, fall back to running pnpm lint:fix on the repo.
+# Use pnpm exec to run the locally-installed lint-staged binary; fall back to pnpm lint:fix
+pnpm -s exec -- lint-staged || pnpm lint:fix --quiet 2>/dev/null || echo "⚠️ Some lint issues may need manual attention"
+
+# Add any auto-fixed files back to staging
+git add . || true
+
+# Load environment variables from .env and .env.local (with priority to .env.local)
+if [ -f .env ]; then
+  set -a  # Automatically export all variables
+  source .env 2>/dev/null || true
+  set +a
+fi
+if [ -f .env.local ]; then
+  set -a  # Automatically export all variables
+  source .env.local 2>/dev/null || true
+  set +a
+fi
+
+# Get the diff of staged changes
+DIFF=$(git diff --staged 2>/dev/null || echo "")
+
+if [ -z "$DIFF" ]; then
+  echo "No staged changes. Creating minimal commit..."
+  COMMIT_MESSAGE=$(create_fallback_message)
+  if [ -z "$COMMIT_MESSAGE" ]; then
+    COMMIT_MESSAGE="Update project files"
+  fi
+  git commit --no-verify -m "$COMMIT_MESSAGE" 2>/dev/null || {
+    echo "Commit failed, but continuing..."
+    exit 0
+  }
+  echo "Commit complete."
+  exit 0
+fi
+
+# Limit diff size to prevent argument length issues (max ~100KB)
+DIFF_SIZE=$(echo -n "$DIFF" | wc -c)
+if [ "$DIFF_SIZE" -gt 102400 ]; then
+  echo "Diff is too large ($DIFF_SIZE bytes). Truncating to first 100KB for commit message generation."
+  DIFF=$(echo -n "$DIFF" | head -c 102400)
+fi
+
+# Base64 encode the diff
+BASE64_DIFF=$(echo -n "$DIFF" | base64)
+
+# Prepare the prompt for Gemini API
+PROMPT="Generate a concise commit message in the conventional commit format from this diff:\n\n$BASE64_DIFF"
+
+# Check Gemini API key
+if [ -z "$GEMINI_API_KEY" ]; then
+    echo "Warning: GEMINI_API_KEY environment variable is not set. Using fallback commit message."
+    COMMIT_MESSAGE=""
+else
+    GEMINI_API_ENDPOINT="https://generativelanguage.googleapis.com/v1/models/gemini-2.5-flash-lite:generateContent?key=$GEMINI_API_KEY"
+
+    # Use jq to safely construct the JSON payload via temporary file to avoid argument length limits
+    TEMP_FILE=$(mktemp)
+    echo -n "$PROMPT" > "$TEMP_FILE"
+
+    JSON_PAYLOAD=$(jq -R -s '{
+        "contents": [{
+          "parts": [{"text": .}]
+        }],
+        "generationConfig": {
+          "temperature": 0.3,
+          "maxOutputTokens": 500
+        }
+      }' < "$TEMP_FILE")
+
+    # Clean up temporary file
+    rm -f "$TEMP_FILE"
+
+    # Check if JSON payload was created successfully
+    if [ -z "$JSON_PAYLOAD" ]; then
+        echo "Error: Failed to create JSON payload. The diff might be too large."
+        COMMIT_MESSAGE=""
+    else
+        # Make the API request
+        echo "🤖 Generating AI commit message..."
+        API_RESPONSE=$(curl -s -X POST \
+          -H "Content-Type: application/json" \
+          -d "$JSON_PAYLOAD" \
+          "$GEMINI_API_ENDPOINT" 2>/dev/null)
+
+        CURL_EXIT_CODE=$?
+
+        if [ $CURL_EXIT_CODE -ne 0 ]; then
+            echo "Warning: curl command failed (exit code: $CURL_EXIT_CODE). Using fallback commit message."
+            API_RESPONSE=""
+        elif [ -z "$API_RESPONSE" ]; then
+            echo "Warning: Empty API response. Using fallback commit message."
+        fi
+
+        # Use Python to parse the JSON and extract the commit message
+        if [ -n "$API_RESPONSE" ]; then
+            COMMIT_MESSAGE=$(python3 -c '
+import sys, json
+try:
+    data = json.load(sys.stdin)
+    if "candidates" in data and len(data["candidates"]) > 0:
+        candidate = data["candidates"][0]
+        if "content" in candidate and "parts" in candidate["content"] and len(candidate["content"]["parts"]) > 0:
+            commit = candidate["content"]["parts"][0]["text"].strip()
+            print(commit)
+        elif "finishReason" in candidate and candidate["finishReason"] == "MAX_TOKENS":
+            print("", file=sys.stderr)  # Empty output to trigger fallback - response was truncated
+        else:
+            print("", file=sys.stderr)  # Empty output to trigger fallback - malformed content
+    elif "error" in data:
+        print("", file=sys.stderr)  # Empty output to trigger fallback
+    else:
+        print("", file=sys.stderr)  # Empty output to trigger fallback
+except json.JSONDecodeError:
+    print("", file=sys.stderr)  # Empty output to trigger fallback
+except KeyError:
+    print("", file=sys.stderr)  # Empty output to trigger fallback
+except Exception:
+    print("", file=sys.stderr)  # Empty output to trigger fallback
+' <<< "$API_RESPONSE" 2>/dev/null)
+        else
+            COMMIT_MESSAGE=""
+        fi
+    fi
+fi
+
+if [ -z "$COMMIT_MESSAGE" ]; then
+    echo "⚠️  AI commit message generation failed. Using fallback..."
+    if [ -z "$GEMINI_API_KEY" ]; then
+        echo "   Reason: GEMINI_API_KEY not set"
+    elif [ -z "$API_RESPONSE" ]; then
+        echo "   Reason: API request failed or empty response"
+    else
+        # Check if it's a MAX_TOKENS issue
+        if echo "$API_RESPONSE" | grep -q '"finishReason": "MAX_TOKENS"'; then
+            echo "   Reason: API response was truncated (MAX_TOKENS reached)"
+            echo "   Try reducing the diff size or prompt length"
+        elif echo "$API_RESPONSE" | grep -q '"parts"'; then
+            echo "   Reason: API response missing text content in parts"
+        else
+            echo "   Reason: API response parsing failed"
+        fi
+        echo "   API Response: $API_RESPONSE"
+    fi
+    echo ""
+    COMMIT_MESSAGE=$(create_fallback_message)
+fi
+
+# Ensure we always have a commit message
+if [ -z "$COMMIT_MESSAGE" ]; then
+    COMMIT_MESSAGE="Update project files"
+fi
+
+# Display the generated commit message
+echo "Generated commit message:"
+echo "$COMMIT_MESSAGE"
+echo ""
+
+# Use the generated commit message in the commit, bypassing the hook
+if git commit --no-verify -m "$COMMIT_MESSAGE" 2>/dev/null; then
+    echo "Commit complete."
+else
+    echo "Commit failed, but pre-commit hook completed successfully."
+    exit 0
+fi
